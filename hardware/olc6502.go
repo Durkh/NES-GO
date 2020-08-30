@@ -1,39 +1,41 @@
 package hardware
 
-import "fmt"
+import (
+	"NES/ioNES"
+	"fmt"
+)
 
-type instruction struct { //string struct
-	name     string
-	operate  func(*Olc5602) uint8
-	addrMode func(*Olc5602) uint8
-	imp      bool
-	cycles   uint8
+type instruction struct { //struct with the model of an instruction of 6502
+	name     string               //the name of the instruction
+	operate  func(*Nes6502) uint8 //the operation of the instruction
+	addrMode func(*Nes6502) uint8 //the addressing mode of the instruction
+	imp      bool                 //boolean to help catching functions with implied addressing mode
+	cycles   uint8                //number of cycles required to perform the instruction
 }
 
 // lookup instruction table
 var lookup [256]instruction
 
-type Olc5602 struct { //cpu class
-	bus *Bus
+type Nes6502 struct { //cpu class
+	bus *ioNES.Bus
 
-	a       uint8
-	x       uint8
-	y       uint8
+	//cpu registers
+	a, x, y uint8
 	stckPtr uint8
 	pc      uint16
 	status  uint8
 
-	fetched uint8
-	addrAbs uint16
-	addrRel uint16
-	opcode  uint8
-	cycles  uint8
+	//variables to help the emulation
+	fetched          uint8
+	addrAbs, addrRel uint16
+	opcode           uint8
+	cycles           uint8
 }
 
-func NewCPU() *Olc5602 {
-	var cpu Olc5602
-	bus := new(Bus)
-	cpu.connectBus(bus)
+func NewCPU() *Nes6502 { //cpu constructor
+	var cpu Nes6502
+	bus := new(ioNES.Bus)
+	cpu.ConnectBus(bus)
 	assignLookup(&lookup)
 	cpu.Reset()
 	return &cpu
@@ -50,19 +52,19 @@ const ( //flags
 	N uint8 = 1 << iota //Negative				128
 )
 
-func (cpu *Olc5602) connectBus(n *Bus) {
+func (cpu *Nes6502) ConnectBus(n *ioNES.Bus) {
 	cpu.bus = n
 }
 
-func (cpu Olc5602) Read(a uint16) uint8 {
-	return cpu.bus.Read(a, false)
+func (cpu Nes6502) Read(a uint16) uint8 {
+	return cpu.bus.CpuRead(a, false)
 }
 
-func (cpu Olc5602) Write(a uint16, d uint8) {
-	cpu.bus.Write(a, d)
+func (cpu Nes6502) Write(a uint16, d uint8) {
+	cpu.bus.CpuWrite(a, d)
 }
 
-func (cpu Olc5602) getFlag(f uint8) uint8 {
+func (cpu Nes6502) getFlag(f uint8) uint8 {
 
 	if (cpu.status & f) > 0 {
 		return 1
@@ -71,7 +73,7 @@ func (cpu Olc5602) getFlag(f uint8) uint8 {
 	}
 }
 
-func (cpu *Olc5602) setFlag(f uint8, v bool) {
+func (cpu *Nes6502) setFlag(f uint8, v bool) {
 
 	if v {
 		cpu.status |= f
@@ -80,7 +82,7 @@ func (cpu *Olc5602) setFlag(f uint8, v bool) {
 	}
 }
 
-func (cpu *Olc5602) Clock() {
+func (cpu *Nes6502) Clock() {
 	if cpu.cycles == 0 {
 		cpu.setFlag(U, true)
 		cpu.opcode = cpu.Read(cpu.pc)
@@ -91,70 +93,92 @@ func (cpu *Olc5602) Clock() {
 		additionalCycle2 := lookup[cpu.opcode].operate(cpu)
 
 		cpu.cycles += additionalCycle1 & additionalCycle2
+		//debugging function TODO: move later to function in main
 		fmt.Printf("%X, %d, %q, %X\n", cpu.opcode, cpu.opcode, lookup[cpu.opcode].name, cpu.fetched)
 	}
 	cpu.cycles--
 }
 
-func (cpu Olc5602) GetCycles() uint8 {
+//cycles getter
+func (cpu Nes6502) GetCycles() uint8 {
 	return cpu.cycles
 }
 
-func (cpu Olc5602) Completed() bool {
+//function to return true when a instruction is completed, useful to step-to-step tests
+func (cpu Nes6502) Completed() bool {
 	return cpu.cycles == 0
 }
 
-func (cpu Olc5602) GetReg() (a uint8, x uint8, y uint8, stckPtr uint8, pc uint16, status uint8) {
+//registers getter
+func (cpu Nes6502) GetReg() (a uint8, x uint8, y uint8, stckPtr uint8, pc uint16, status uint8) {
 	return cpu.a, cpu.x, cpu.y, cpu.stckPtr, cpu.pc, cpu.status
 }
 
 // ADDRESSING MODES
 
-func (cpu *Olc5602) imp() uint8 {
+/*
+Implied addressing mode
+Used when the instruction has no aditional data to fetch
+*/
+func (cpu *Nes6502) imp() uint8 {
 
 	cpu.fetched = cpu.a
 	return 0
 }
 
-func (cpu *Olc5602) imm() uint8 {
+/*
+Immediate addressing mode
+Used when the data is immediately after the instruction
+*/
+func (cpu *Nes6502) imm() uint8 {
 	cpu.addrAbs = cpu.pc
 	cpu.pc++
 	return 0
 }
 
-func (cpu *Olc5602) zp0() uint8 {
+/*
+Zero page addressing mode
+Get only the first byte of address, saving time reading the other byte
+*/
+func (cpu *Nes6502) zp0() uint8 {
 	cpu.addrAbs = uint16(cpu.Read(cpu.pc))
 	cpu.pc++
 	cpu.addrAbs &= 0x00FF
 	return 0
 }
 
-func (cpu *Olc5602) zpx() uint8 {
+func (cpu *Nes6502) zpx() uint8 {
 	cpu.addrAbs = uint16(cpu.Read(cpu.pc + uint16(cpu.x)))
 	cpu.pc++
 	cpu.addrAbs &= 0x00FF
 	return 0
 }
 
-func (cpu *Olc5602) zpy() uint8 {
+func (cpu *Nes6502) zpy() uint8 {
 	cpu.addrAbs = uint16(cpu.Read(cpu.pc + uint16(cpu.y)))
 	cpu.pc++
 	cpu.addrAbs &= 0x00FF
 	return 0
 }
 
-func (cpu *Olc5602) rel() uint8 {
+/*
+relative addressing mode
+can refer to -128 ~ +127 of the current address
+used to branch flow of the code
+*/
+func (cpu *Nes6502) rel() uint8 {
 	cpu.addrRel = uint16(cpu.Read(cpu.pc))
 	cpu.pc++
 
+	// catch if the address if referring to a negative position referencing the current address
 	if cpu.addrRel > 0x80 {
-		cpu.addrRel -= 0x100
+		cpu.addrRel -= 0x100 //if true, make the hexadecimal negative by subtracting 0x100, useful when adding to PC
 	}
 
 	return 0
 }
 
-func (cpu *Olc5602) abs() uint8 {
+func (cpu *Nes6502) abs() uint8 {
 
 	var low, high uint16
 
@@ -168,7 +192,7 @@ func (cpu *Olc5602) abs() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) abx() uint8 {
+func (cpu *Nes6502) abx() uint8 {
 
 	var low, high uint16
 
@@ -187,7 +211,7 @@ func (cpu *Olc5602) abx() uint8 {
 	}
 }
 
-func (cpu *Olc5602) aby() uint8 {
+func (cpu *Nes6502) aby() uint8 {
 
 	var low, high uint16
 
@@ -206,7 +230,7 @@ func (cpu *Olc5602) aby() uint8 {
 	}
 }
 
-func (cpu *Olc5602) ind() uint8 {
+func (cpu *Nes6502) ind() uint8 {
 	var ptrLow, ptrHigh, ptr uint16
 
 	ptrLow = uint16(cpu.Read(cpu.pc))
@@ -224,7 +248,7 @@ func (cpu *Olc5602) ind() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) izx() uint8 {
+func (cpu *Nes6502) izx() uint8 {
 	var low, high, t uint16
 
 	t = uint16(cpu.Read(cpu.pc))
@@ -238,7 +262,7 @@ func (cpu *Olc5602) izx() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) izy() uint8 {
+func (cpu *Nes6502) izy() uint8 {
 	var low, high, t uint16
 
 	t = uint16(cpu.Read(cpu.pc))
@@ -257,7 +281,7 @@ func (cpu *Olc5602) izy() uint8 {
 	}
 }
 
-func (cpu *Olc5602) fetch() uint8 {
+func (cpu *Nes6502) fetch() uint8 {
 
 	if lookup[cpu.opcode].imp != true {
 		cpu.fetched = cpu.Read(cpu.addrAbs)
@@ -267,7 +291,7 @@ func (cpu *Olc5602) fetch() uint8 {
 
 // OPCODE FUNCTIONS
 
-func (cpu *Olc5602) adc() uint8 {
+func (cpu *Nes6502) adc() uint8 {
 
 	cpu.fetch()
 
@@ -281,7 +305,7 @@ func (cpu *Olc5602) adc() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) and() uint8 {
+func (cpu *Nes6502) and() uint8 {
 	cpu.fetch()
 	cpu.a = cpu.a & cpu.fetched
 	cpu.setFlag(Z, cpu.a == 0x00)
@@ -290,7 +314,7 @@ func (cpu *Olc5602) and() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) asl() uint8 {
+func (cpu *Nes6502) asl() uint8 {
 
 	cpu.fetch()
 	temp := uint16(cpu.fetched) << 1
@@ -307,7 +331,7 @@ func (cpu *Olc5602) asl() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bcc() uint8 {
+func (cpu *Nes6502) bcc() uint8 {
 	if cpu.getFlag(C) == 0 {
 		cpu.cycles++
 		cpu.addrAbs = cpu.pc + cpu.addrRel
@@ -320,7 +344,7 @@ func (cpu *Olc5602) bcc() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bcs() uint8 {
+func (cpu *Nes6502) bcs() uint8 {
 
 	if cpu.getFlag(C) == 1 {
 		cpu.cycles++
@@ -334,7 +358,7 @@ func (cpu *Olc5602) bcs() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) beq() uint8 {
+func (cpu *Nes6502) beq() uint8 {
 
 	if cpu.getFlag(Z) == 1 {
 		cpu.cycles++
@@ -348,7 +372,7 @@ func (cpu *Olc5602) beq() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bit() uint8 {
+func (cpu *Nes6502) bit() uint8 {
 
 	cpu.fetch()
 	temp := cpu.a & cpu.fetched
@@ -359,7 +383,7 @@ func (cpu *Olc5602) bit() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bmi() uint8 {
+func (cpu *Nes6502) bmi() uint8 {
 
 	if cpu.getFlag(N) == 1 {
 		cpu.cycles++
@@ -373,7 +397,7 @@ func (cpu *Olc5602) bmi() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bne() uint8 {
+func (cpu *Nes6502) bne() uint8 {
 
 	if cpu.getFlag(Z) == 0 {
 		cpu.cycles++
@@ -387,7 +411,7 @@ func (cpu *Olc5602) bne() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bpl() uint8 {
+func (cpu *Nes6502) bpl() uint8 {
 
 	if cpu.getFlag(N) == 0 {
 		cpu.cycles++
@@ -401,7 +425,7 @@ func (cpu *Olc5602) bpl() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) brk() uint8 {
+func (cpu *Nes6502) brk() uint8 {
 
 	cpu.pc++
 
@@ -421,7 +445,7 @@ func (cpu *Olc5602) brk() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bvc() uint8 {
+func (cpu *Nes6502) bvc() uint8 {
 
 	if cpu.getFlag(V) == 0 {
 		cpu.cycles++
@@ -435,7 +459,7 @@ func (cpu *Olc5602) bvc() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) bvs() uint8 {
+func (cpu *Nes6502) bvs() uint8 {
 
 	if cpu.getFlag(V) == 1 {
 		cpu.cycles++
@@ -449,28 +473,28 @@ func (cpu *Olc5602) bvs() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) clc() uint8 {
+func (cpu *Nes6502) clc() uint8 {
 
 	cpu.setFlag(C, false)
 	return 0
 }
 
-func (cpu *Olc5602) cld() uint8 {
+func (cpu *Nes6502) cld() uint8 {
 	cpu.setFlag(D, false)
 	return 0
 }
 
-func (cpu *Olc5602) cli() uint8 {
+func (cpu *Nes6502) cli() uint8 {
 	cpu.setFlag(I, false)
 	return 0
 }
 
-func (cpu *Olc5602) clv() uint8 {
+func (cpu *Nes6502) clv() uint8 {
 	cpu.setFlag(V, false)
 	return 0
 }
 
-func (cpu *Olc5602) cmp() uint8 {
+func (cpu *Nes6502) cmp() uint8 {
 	cpu.fetch()
 
 	temp := uint16(cpu.a) - uint16(cpu.fetched)
@@ -481,7 +505,7 @@ func (cpu *Olc5602) cmp() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) cpx() uint8 {
+func (cpu *Nes6502) cpx() uint8 {
 	cpu.fetch()
 
 	temp := uint16(cpu.x) - uint16(cpu.fetched)
@@ -492,7 +516,7 @@ func (cpu *Olc5602) cpx() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) cpy() uint8 {
+func (cpu *Nes6502) cpy() uint8 {
 	cpu.fetch()
 
 	temp := uint16(cpu.y) - uint16(cpu.fetched)
@@ -503,7 +527,7 @@ func (cpu *Olc5602) cpy() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) dec() uint8 {
+func (cpu *Nes6502) dec() uint8 {
 
 	cpu.fetch()
 	temp := cpu.fetched - 1
@@ -514,7 +538,7 @@ func (cpu *Olc5602) dec() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) dex() uint8 {
+func (cpu *Nes6502) dex() uint8 {
 
 	cpu.x--
 	cpu.setFlag(Z, cpu.x == 0x00)
@@ -523,7 +547,7 @@ func (cpu *Olc5602) dex() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) dey() uint8 {
+func (cpu *Nes6502) dey() uint8 {
 
 	cpu.y--
 	cpu.setFlag(Z, cpu.y == 0x00)
@@ -532,7 +556,7 @@ func (cpu *Olc5602) dey() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) eor() uint8 {
+func (cpu *Nes6502) eor() uint8 {
 
 	cpu.fetch()
 	cpu.a = cpu.a ^ cpu.fetched
@@ -542,7 +566,7 @@ func (cpu *Olc5602) eor() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) inc() uint8 {
+func (cpu *Nes6502) inc() uint8 {
 	cpu.fetch()
 
 	temp := cpu.fetched + 1
@@ -553,7 +577,7 @@ func (cpu *Olc5602) inc() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) inx() uint8 {
+func (cpu *Nes6502) inx() uint8 {
 
 	cpu.x++
 	cpu.setFlag(Z, cpu.x == 0x00)
@@ -562,7 +586,7 @@ func (cpu *Olc5602) inx() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) iny() uint8 {
+func (cpu *Nes6502) iny() uint8 {
 
 	cpu.y++
 	cpu.setFlag(Z, cpu.y == 0x00)
@@ -571,14 +595,14 @@ func (cpu *Olc5602) iny() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) jmp() uint8 {
+func (cpu *Nes6502) jmp() uint8 {
 
 	cpu.pc = cpu.addrAbs
 
 	return 0
 }
 
-func (cpu *Olc5602) jsr() uint8 {
+func (cpu *Nes6502) jsr() uint8 {
 
 	cpu.pc--
 
@@ -592,7 +616,7 @@ func (cpu *Olc5602) jsr() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) lda() uint8 {
+func (cpu *Nes6502) lda() uint8 {
 
 	cpu.fetch()
 	cpu.a = cpu.fetched
@@ -602,7 +626,7 @@ func (cpu *Olc5602) lda() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) ldx() uint8 {
+func (cpu *Nes6502) ldx() uint8 {
 
 	cpu.fetch()
 	cpu.x = cpu.fetched
@@ -612,7 +636,7 @@ func (cpu *Olc5602) ldx() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) ldy() uint8 {
+func (cpu *Nes6502) ldy() uint8 {
 
 	cpu.fetch()
 	cpu.y = cpu.fetched
@@ -622,7 +646,7 @@ func (cpu *Olc5602) ldy() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) lsr() uint8 {
+func (cpu *Nes6502) lsr() uint8 {
 
 	cpu.fetch()
 	cpu.setFlag(C, (cpu.fetched&0x0001) != 0)
@@ -639,7 +663,7 @@ func (cpu *Olc5602) lsr() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) nop() uint8 {
+func (cpu *Nes6502) nop() uint8 {
 
 	switch cpu.opcode {
 	case 0x1C:
@@ -658,7 +682,7 @@ func (cpu *Olc5602) nop() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) ora() uint8 {
+func (cpu *Nes6502) ora() uint8 {
 	cpu.fetch()
 	cpu.a = cpu.a | cpu.fetched
 	cpu.setFlag(Z, cpu.a == 0x00)
@@ -667,14 +691,14 @@ func (cpu *Olc5602) ora() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) pha() uint8 {
+func (cpu *Nes6502) pha() uint8 {
 
 	cpu.Write(0x0100+uint16(cpu.stckPtr), cpu.a)
 	cpu.stckPtr--
 	return 0
 }
 
-func (cpu *Olc5602) php() uint8 {
+func (cpu *Nes6502) php() uint8 {
 	cpu.Write(0x0100+uint16(cpu.stckPtr), cpu.status|B|U)
 	cpu.setFlag(B, false)
 	cpu.setFlag(U, false)
@@ -683,7 +707,7 @@ func (cpu *Olc5602) php() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) pla() uint8 {
+func (cpu *Nes6502) pla() uint8 {
 
 	cpu.stckPtr++
 	cpu.a = cpu.Read(0x0100 + uint16(cpu.stckPtr))
@@ -693,7 +717,7 @@ func (cpu *Olc5602) pla() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) plp() uint8 {
+func (cpu *Nes6502) plp() uint8 {
 
 	cpu.stckPtr++
 	cpu.status = cpu.Read(0x0100 + uint16(cpu.stckPtr))
@@ -702,7 +726,7 @@ func (cpu *Olc5602) plp() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) rol() uint8 {
+func (cpu *Nes6502) rol() uint8 {
 
 	cpu.fetch()
 	temp := uint16(cpu.fetched<<1) | uint16(cpu.getFlag(C))
@@ -719,7 +743,7 @@ func (cpu *Olc5602) rol() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) ror() uint8 {
+func (cpu *Nes6502) ror() uint8 {
 
 	cpu.fetch()
 	temp := (uint16(cpu.getFlag(C)) << 7) | uint16(cpu.fetched>>1)
@@ -736,7 +760,7 @@ func (cpu *Olc5602) ror() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) rti() uint8 {
+func (cpu *Nes6502) rti() uint8 {
 
 	cpu.stckPtr++
 	cpu.status = cpu.Read(0x100 + uint16(cpu.stckPtr))
@@ -750,7 +774,7 @@ func (cpu *Olc5602) rti() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) rts() uint8 {
+func (cpu *Nes6502) rts() uint8 {
 
 	cpu.stckPtr++
 	cpu.pc = uint16(cpu.Read(0x0100 + uint16(cpu.stckPtr)))
@@ -761,7 +785,7 @@ func (cpu *Olc5602) rts() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) sbc() uint8 {
+func (cpu *Nes6502) sbc() uint8 {
 
 	cpu.fetch()
 	value := uint16(cpu.fetched) ^ 0x00FF
@@ -775,44 +799,44 @@ func (cpu *Olc5602) sbc() uint8 {
 	return 1
 }
 
-func (cpu *Olc5602) sec() uint8 {
+func (cpu *Nes6502) sec() uint8 {
 
 	cpu.setFlag(C, true)
 	return 0
 }
 
-func (cpu *Olc5602) sed() uint8 {
+func (cpu *Nes6502) sed() uint8 {
 
 	cpu.setFlag(D, true)
 	return 0
 }
 
-func (cpu *Olc5602) sei() uint8 {
+func (cpu *Nes6502) sei() uint8 {
 
 	cpu.setFlag(I, true)
 	return 0
 }
 
-func (cpu *Olc5602) sta() uint8 {
+func (cpu *Nes6502) sta() uint8 {
 
 	cpu.Write(cpu.addrAbs, cpu.a)
 	return 0
 }
 
-func (cpu *Olc5602) stx() uint8 {
+func (cpu *Nes6502) stx() uint8 {
 
 	cpu.Write(cpu.addrAbs, cpu.x)
 	return 0
 }
 
-func (cpu *Olc5602) sty() uint8 {
+func (cpu *Nes6502) sty() uint8 {
 
 	cpu.Write(cpu.addrAbs, cpu.y)
 	return 0
 
 }
 
-func (cpu *Olc5602) tax() uint8 {
+func (cpu *Nes6502) tax() uint8 {
 
 	cpu.x = cpu.a
 	cpu.setFlag(Z, cpu.x == 0x00)
@@ -821,7 +845,7 @@ func (cpu *Olc5602) tax() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) tay() uint8 {
+func (cpu *Nes6502) tay() uint8 {
 
 	cpu.y = cpu.a
 	cpu.setFlag(Z, cpu.y == 0x00)
@@ -830,7 +854,7 @@ func (cpu *Olc5602) tay() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) tsx() uint8 {
+func (cpu *Nes6502) tsx() uint8 {
 
 	cpu.x = cpu.stckPtr
 	cpu.setFlag(Z, cpu.x == 0x00)
@@ -839,7 +863,7 @@ func (cpu *Olc5602) tsx() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) txa() uint8 {
+func (cpu *Nes6502) txa() uint8 {
 
 	cpu.a = cpu.x
 	cpu.setFlag(Z, cpu.a == 0x00)
@@ -849,14 +873,14 @@ func (cpu *Olc5602) txa() uint8 {
 
 }
 
-func (cpu *Olc5602) txs() uint8 {
+func (cpu *Nes6502) txs() uint8 {
 
 	cpu.stckPtr = cpu.x
 
 	return 0
 }
 
-func (cpu *Olc5602) tya() uint8 {
+func (cpu *Nes6502) tya() uint8 {
 
 	cpu.a = cpu.y
 	cpu.setFlag(Z, cpu.a == 0x00)
@@ -866,11 +890,11 @@ func (cpu *Olc5602) tya() uint8 {
 
 }
 
-func (cpu Olc5602) xxx() uint8 {
+func (cpu Nes6502) xxx() uint8 {
 	return 0
 }
 
-func (cpu *Olc5602) Reset() {
+func (cpu *Nes6502) Reset() {
 	cpu.a = 0
 	cpu.x = 0
 	cpu.y = 0
@@ -890,7 +914,7 @@ func (cpu *Olc5602) Reset() {
 	cpu.cycles = 8
 }
 
-func (cpu *Olc5602) irq() {
+func (cpu *Nes6502) irq() {
 
 	if cpu.getFlag(I) == 0 {
 
@@ -914,7 +938,7 @@ func (cpu *Olc5602) irq() {
 	}
 }
 
-func (cpu *Olc5602) nmi() {
+func (cpu *Nes6502) nmi() {
 
 	cpu.Write(0x0100+uint16(cpu.stckPtr), uint8((cpu.pc>>8)&0x000FF))
 	cpu.stckPtr--
